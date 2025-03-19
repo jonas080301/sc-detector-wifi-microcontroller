@@ -1,7 +1,7 @@
 /**
  ******************************************************************************
  * @file    Wifi/WiFi_HTTP_Server/src/main.c
- * @author  MCD Application Team
+ * @author  Jonas
  * @brief   This file provides main program functions
  ******************************************************************************
  * @attention
