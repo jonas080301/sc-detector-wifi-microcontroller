@@ -21,7 +21,7 @@
 /* Private defines -----------------------------------------------------------*/
 /* Update SSID and PASSWORD with own Access point settings */
 #define SSID "WLAN-070011"
-#define PASSWORD "6313476839050187"
+#define PASSWORD "xxx"
 #define PORT 80
 #define MAX_SEGMENT_SIZE                                                       \
   512 // Definiere hier die maximale Segmentgröße (anpassen, falls nötig)
