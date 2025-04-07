@@ -19,9 +19,21 @@
 #include "main.h"
 
 /* Private defines -----------------------------------------------------------*/
+// Scenario states
+typedef enum {
+  NO_SCENARIO,
+  POSSIBLE_SCENARIO,
+  SCENARIO_DETECTED
+} ScenarioState;
+
+ScenarioState scenario_state = NO_SCENARIO;
+
+// Deceleration capability in mm/s² (e.g., 1000 mm/s² = 1 m/s²)
+const float max_decel = 1000.0f;
+
 /* Update SSID and PASSWORD with own Access point settings */
 #define SSID "WLAN-070011"
-#define PASSWORD "xxx"
+#define PASSWORD "6313476839050187"
 #define PORT 80
 #define MAX_SEGMENT_SIZE                                                       \
   512 // Definiere hier die maximale Segmentgröße (anpassen, falls nötig)
@@ -37,6 +49,19 @@
 #else
 #define LOG(a)
 #endif
+#define ALPHA 0.1f // Filterstärke (0.0 = nur alt, 1.0 = nur neu)
+#define DIST_SAMPLE_INTERVAL 0.1f // 100ms zwischen Messungen (Sekunden)
+#define CALIB_SAMPLES 100
+#define DIST_AVG_SAMPLES 3
+#define ACC_DT 0.1f // Zeitabstand in Sekunden (100ms)
+// Optional: Beschleunigungs-Schwellenwert, um Rauschen zu unterdrücken
+#define ACC_THRESHOLD 0.05f // g
+
+TIM_HandleTypeDef htim2;
+
+// Offset-Werte automatisch ermittelt
+int16_t acc_offset[3] = {0};
+float gyro_offset[3] = {0.0f};
 
 /* Private typedef------------------------------------------------------------*/
 /* Private macro -------------------------------------------------------------*/
@@ -48,6 +73,21 @@ extern UART_HandleTypeDef hDiscoUart;
 static uint8_t http[1024];
 static uint8_t IP_Addr[4];
 static int LedState = 0;
+
+// Aktuelle Sensorwerte initialisieren
+static int distance = 0; // distance 0 -> invalid measurement
+
+// Gefilterte Werte initialisieren
+static float acc_filtered[3] = {0};
+static float gyro_filtered[3] = {0};
+static uint16_t distance_buffer[DIST_AVG_SAMPLES] = {0};
+static uint32_t distance_sum = 0;
+static uint8_t distance_index = 0;
+static uint16_t previous_distance = 0;
+static uint16_t distance_avg = 0;
+
+static float speed = 0.0f; // mm/s
+float acc_velocity = 0.0f; // Geschwindigkeit über Integration [mm/s]
 
 /* Private function prototypes -----------------------------------------------*/
 #if defined(TERMINAL_USE)
@@ -66,6 +106,8 @@ static int wifi_server(void);
 static int wifi_start(void);
 static int wifi_connect(void);
 static bool WebServerProcess(void);
+void calibrateSensors(void);
+void read_sensors(void);
 
 /* Private functions ---------------------------------------------------------*/
 /**
@@ -74,12 +116,16 @@ static bool WebServerProcess(void);
  * @retval None
  */
 int main(void) {
+
   /* Reset of all peripherals, Initializes the Flash interface and the Systick.
    */
   HAL_Init();
 
   /* Configure the system clock */
   SystemClock_Config();
+
+  /* Init Timer for Sensor*/
+  MX_TIM2_Init();
 
   /* Configure LED2 */
   BSP_LED_Init(LED2);
@@ -101,15 +147,77 @@ int main(void) {
   hDiscoUart.Init.OverSampling = UART_OVERSAMPLING_16;
   hDiscoUart.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   hDiscoUart.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-
+  SENSOR_IO_Init();
   BSP_COM_Init(COM1, &hDiscoUart);
   BSP_TSENSOR_Init();
+  BSP_ACCELERO_Init();
+  BSP_GYRO_Init();
+  // Start the measure of tof
+  startToF();
+
+  calibrateSensors();
+
+  /* Start the Sensor Timer */
+  HAL_TIM_Base_Start_IT(&htim2);
 
   printf("****** WIFI Web Server demonstration****** \n\n");
 
 #endif /* TERMINAL_USE */
 
   wifi_server();
+}
+
+// Scenario detection logic (call this regularly after read_sensors)
+void check_scenario() {
+  if (speed > 0.0f &&
+      speed < -3000.00f) { // Maximum speed of microcontroller is 3m/s and
+                           // should not be positiv, ignore other values
+    speed = 0.0f;
+  }
+  // printf("prev: %.2f mm/s\n", previous_distance);
+  // printf("Distancavg: %.2f mm/s\n", distance_avg);
+  switch (scenario_state) {
+  case NO_SCENARIO:
+    // Check if object is approaching (distance decreasing and speed negative)
+    if ((distance_avg < previous_distance) && (speed < 0)) {
+      printf("→ Possible scenario detected. Switching state.\n");
+      scenario_state = POSSIBLE_SCENARIO;
+    }
+    break;
+
+  case POSSIBLE_SCENARIO: {
+    // Check if a collision is avoidable using basic kinematics: v² / 2a < s
+    float stopping_distance = (speed * speed) / (2.0f * max_decel); // mm
+    printf(
+        "→ Stopping distance: %.2f mm | Remaining: %d mm | Speed: %.2f mm/s\n",
+        stopping_distance, distance_avg, speed);
+
+    // Case: safe stop is still possible
+    if (stopping_distance < distance_avg || distance_avg <= 1) {
+      // Exit condition: no danger anymore
+      if (distance_avg >= previous_distance || speed >= 0 ||
+          distance_avg == 0) {
+        printf("→ Scenario no longer likely. Returning to NO_SCENARIO.\n");
+        scenario_state = NO_SCENARIO;
+      } else {
+        // Still possible scenario
+        printf("→ Still possible scenario.\n");
+      }
+    } else {
+      // Collision cannot be avoided
+      printf("→ Collision unavoidable. SCENARIO DETECTED!\n");
+      scenario_state = SCENARIO_DETECTED;
+    }
+    break;
+  }
+
+  case SCENARIO_DETECTED:
+    // In detected state, do something – e.g., trigger alert or log
+    printf("⚠️  Scenario detected: take action!\n");
+    scenario_state = NO_SCENARIO;
+    // Optional: remain here or return to NO_SCENARIO after some time
+    break;
+  }
 }
 
 /**
@@ -136,6 +244,145 @@ static int wifi_start(void) {
     return -1;
   }
   return 0;
+}
+
+void update_acc_velocity() {
+  float a_z = acc_filtered[2]; // Z-Achse, z. B. in g
+
+  // Beschleunigung in m/s² umrechnen (1g ≈ 9.81 m/s²)
+  float a_z_mps2 = a_z * 9.81f;
+
+  // Optional: Rauschen ignorieren
+  if (fabs(a_z) < ACC_THRESHOLD)
+    a_z_mps2 = 0;
+
+  // Geschwindigkeit integrieren (m/s → mm/s)
+  acc_velocity += a_z_mps2 * ACC_DT * 1000.0f;
+}
+
+void calibrateSensors() {
+  int32_t acc_sum[3] = {0};
+  float gyro_sum[3] = {0};
+
+  for (int i = 0; i < CALIB_SAMPLES; i++) {
+    int16_t acc[3];
+    float gyro[3];
+
+    BSP_ACCELERO_AccGetXYZ(acc);
+    BSP_GYRO_GetXYZ(gyro);
+
+    for (int j = 0; j < 3; j++) {
+      acc_sum[j] += acc[j];
+      gyro_sum[j] += gyro[j];
+    }
+
+    HAL_Delay(5); // 5 ms warten
+  }
+
+  for (int i = 0; i < 3; i++) {
+    acc_offset[i] = acc_sum[i] / CALIB_SAMPLES;
+    gyro_offset[i] = gyro_sum[i] / CALIB_SAMPLES;
+  }
+
+  printf("Kalibrierung abgeschlossen.\n");
+  printf("Acc Offset: X=%d Y=%d Z=%d\n", acc_offset[0], acc_offset[1],
+         acc_offset[2]);
+  printf("Gyro Offset: X=%.2f Y=%.2f Z=%.2f\n", gyro_offset[0], gyro_offset[1],
+         gyro_offset[2]);
+}
+
+// Read sensordata (after interrupt)
+void read_sensors() {
+  startToF();
+  HAL_Delay(5); // 5 ms warten
+  getDistance(&distance);
+
+  // Distance Moving Average
+  // Distance Moving Average (excluding zero values)
+  distance_sum -= distance_buffer[distance_index];
+  distance_buffer[distance_index] = distance;
+
+  // Only add to sum if the new value is not zero
+  if (distance != 0) {
+    distance_sum += distance;
+  }
+
+  distance_index = (distance_index + 1) % DIST_AVG_SAMPLES;
+
+  // Recalculate average excluding zeros
+  uint16_t valid_samples = 0;
+  uint32_t sum = 0;
+
+  for (int i = 0; i < DIST_AVG_SAMPLES; i++) {
+    if (distance_buffer[i] != 0) {
+      sum += distance_buffer[i];
+      valid_samples++;
+    }
+  }
+
+  if (valid_samples > 0) {
+    distance_avg = sum / valid_samples;
+  } else {
+    distance_avg = 0; // fallback if all values are zero
+  }
+
+  // Geschwindigkeit berechnen (v = Δs / Δt)
+  int16_t delta_distance = (int16_t)distance_avg - (int16_t)previous_distance;
+  speed = (float)delta_distance / DIST_SAMPLE_INTERVAL; // mm/s
+
+  printf("Distance: %d mm\n", distance_avg);
+  printf("Speed: %.2f mm/s\n", speed);
+
+  // check_scenario();
+
+  // Letzte Distanz für nächste Messung merken
+  previous_distance = distance_avg;
+}
+
+void read_sensorsold() {
+  int16_t acc_raw[3];
+  float gyro_raw[3];
+
+  startToF();
+  getDistance(&distance);
+
+  // Distance Moving Average
+  distance_sum -= distance_buffer[distance_index];
+  distance_buffer[distance_index] = distance;
+  distance_sum += distance;
+  distance_index = (distance_index + 1) % DIST_AVG_SAMPLES;
+
+  distance_avg = distance_sum / DIST_AVG_SAMPLES;
+
+  // Geschwindigkeit berechnen (v = Δs / Δt)
+  int16_t delta_distance = (int16_t)distance_avg - (int16_t)previous_distance;
+  speed = (float)delta_distance / DIST_SAMPLE_INTERVAL; // mm/s
+
+  // Letzte Distanz für nächste Messung merken
+  previous_distance = distance_avg;
+
+  BSP_ACCELERO_AccGetXYZ(acc_raw);
+  BSP_GYRO_GetXYZ(gyro_raw);
+
+  for (int i = 0; i < 3; i++) {
+    float acc_corrected = (float)(acc_raw[i] - acc_offset[i]);
+    float gyro_corrected = gyro_raw[i] - gyro_offset[i];
+
+    acc_filtered[i] = (1 - ALPHA) * acc_filtered[i] + ALPHA * acc_corrected;
+    gyro_filtered[i] = (1 - ALPHA) * gyro_filtered[i] + ALPHA * gyro_corrected;
+  }
+
+  // printf("Accelerometer -> X: %.2f, Y: %.2f, Z: %.2f\n", acc_filtered[0],
+  //        acc_filtered[1], acc_filtered[2]);
+
+  // printf("Gyroscope     -> X: %.2f, Y: %.2f, Z: %.2f\n", gyro_filtered[0],
+  //        gyro_filtered[1], gyro_filtered[2]);
+
+  printf("Distance: %u mm (avg)\n", distance_avg);
+  update_acc_velocity();
+  printf("Distance: %d mm\n", distance_avg);
+  printf("Speed: %.2f mm/s\n", speed);
+  printf("Speed (Accelerometer): %.2f mm/s\n", acc_velocity);
 }
 
 int wifi_connect(void) {
@@ -205,7 +452,6 @@ int wifi_server(void) {
 }
 
 static bool WebServerProcess(void) {
-  uint8_t temp;
   uint16_t respLen;
   static uint8_t resp[1024];
   bool stopserver = false;
@@ -217,8 +463,7 @@ static bool WebServerProcess(void) {
     if (respLen > 0) {
       if (strstr((char *)resp, "GET")) /* GET: put web page */
       {
-        temp = (int)BSP_TSENSOR_ReadTemp();
-        if (SendWebPage(LedState, temp) != WIFI_STATUS_OK) {
+        if (SendWebPage(LedState, distance_avg) != WIFI_STATUS_OK) {
           LOG(("> ERROR : Cannot send web page\n"));
         } else {
           LOG(("Send page after  GET command\n"));
@@ -235,7 +480,6 @@ static bool WebServerProcess(void) {
             LedState = 1;
             BSP_LED_On(LED2);
           }
-          temp = (int)BSP_TSENSOR_ReadTemp();
         }
         if (strstr((char *)resp, "stop_server")) {
           if (strstr((char *)resp, "stop_server=0")) {
@@ -244,8 +488,7 @@ static bool WebServerProcess(void) {
             stopserver = true;
           }
         }
-        temp = (int)BSP_TSENSOR_ReadTemp();
-        if (SendWebPage(LedState, temp) != WIFI_STATUS_OK) {
+        if (SendWebPage(LedState, distance_avg) != WIFI_STATUS_OK) {
           LOG(("> ERROR : Cannot send web page\n"));
         } else {
           LOG(("Send Page after POST command\n"));
@@ -263,8 +506,9 @@ static bool WebServerProcess(void) {
  * @param  None
  * @retval None
  */
-static WIFI_Status_t SendWebPage(uint8_t ledIsOn, uint8_t temperature) {
-  uint8_t temp[50];
+static WIFI_Status_t SendWebPage(uint8_t ledIsOn, uint8_t distance) {
+  uint8_t dist[10];
+  int8_t current_speed[10];
   uint16_t SentDataLength;
   WIFI_Status_t ret;
 
@@ -274,7 +518,8 @@ static WIFI_Status_t SendWebPage(uint8_t ledIsOn, uint8_t temperature) {
       (char *)http,
       "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nPragma: no-cache\r\n\r\n");
   strcat((char *)http, "<html><head>");
-  strcat((char *)http, "<title>Scenario Detector Webserver</title>");
+  strcat((char *)http, "<title>SC Detector</title>");
+  strcat((char *)http, "<meta http-equiv='refresh' content='1'>");
   /* TailwindCSS via Browser-Script einbinden */
   strcat((char *)http,
          "<script src='https://unpkg.com/@tailwindcss/browser@4'></script>");
@@ -285,46 +530,49 @@ static WIFI_Status_t SendWebPage(uint8_t ledIsOn, uint8_t temperature) {
   strcat((char *)http,
          "<div class='bg-white shadow-lg rounded-lg p-8 max-w-md w-full'>");
   strcat((char *)http, "<h2 class='text-3xl font-bold mb-6 "
-                       "text-center'>Folgende Szenarien wurden erkannt</h2>");
+                       "text-center'>Erkannte Szenarien</h2>");
 
   /* Formular */
   strcat((char *)http, "<form method='POST' class='space-y-6'>");
 
   /* Temperaturanzeige */
   strcat((char *)http, "<div class='flex items-center space-x-3'>");
-  strcat((char *)http,
-         "<label class='text-gray-700 font-semibold'>Temp:</label>");
-  sprintf((char *)temp, "%d", temperature);
-  strcat((char *)http, "<input type='text' value='");
-  strcat((char *)http, (char *)temp);
-  strcat((char *)http,
-         "' readonly class='border rounded px-2 py-1 w-20 text-center'>");
+  sprintf((char *)dist, "%d mm", distance);
+  strcat((char *)http, "<p>Distanz: ");
+  strcat((char *)http, (char *)dist);
+  strcat((char *)http, "</p>");
+
+  sprintf((char *)current_speed, "%.2f mm/s", speed);
+  strcat((char *)http, "<p>Geschwindigkeit: ");
+  strcat((char *)http, (char *)current_speed);
+  strcat((char *)http, "</p>");
   strcat((char *)http, "</div>");
 
-  /* LED-Auswahl */
-  strcat((char *)http, "<div class='flex items-center space-x-6'>");
+  /* Zwei Direkt-Buttons für POST mit Styling je nach Status */
+  strcat((char *)http, "<div class='flex justify-center space-x-4'>");
+
   if (ledIsOn) {
-    strcat((char *)http,
-           "<label class='flex items-center text-gray-700'><input type='radio' "
-           "name='radio' value='0' class='mr-1'>LED aus</label>");
-    strcat((char *)http,
-           "<label class='flex items-center text-gray-700'><input type='radio' "
-           "name='radio' value='1' checked class='mr-1'>LED an</label>");
+    // Detector ist AN → dieser Button gefüllt
+    strcat((char *)http, "<button name='radio' value='1' type='submit' "
+                         "class='bg-green-500 hover:bg-green-600 text-white "
+                         "font-bold py-2 px-4 rounded'>"
+                         "Detector an</button>");
+    strcat((char *)http, "<button name='radio' value='0' type='submit' "
+                         "class='bg-white border border-gray-400 text-gray-700 "
+                         "font-bold py-2 px-4 rounded'>"
+                         "Detector aus</button>");
   } else {
-    strcat((char *)http,
-           "<label class='flex items-center text-gray-700'><input type='radio' "
-           "name='radio' value='0' checked class='mr-1'>LED aus</label>");
-    strcat((char *)http,
-           "<label class='flex items-center text-gray-700'><input type='radio' "
-           "name='radio' value='1' class='mr-1'>LED an</label>");
+    // Detector ist AUS → dieser Button gefüllt
+    strcat((char *)http, "<button name='radio' value='1' type='submit' "
+                         "class='bg-white border border-gray-400 text-gray-700 "
+                         "font-bold py-2 px-4 rounded'>"
+                         "Detector an</button>");
+    strcat((char *)http, "<button name='radio' value='0' type='submit' "
+                         "class='bg-red-500 hover:bg-red-600 text-white "
+                         "font-bold py-2 px-4 rounded'>"
+                         "Detector aus</button>");
   }
-  strcat((char *)http, "</div>");
 
-  /* Submit-Button */
-  strcat((char *)http, "<div class='text-center'>");
-  strcat((char *)http,
-         "<input type='submit' value='Absenden' class='bg-blue-500 "
-         "hover:bg-blue-700 text-white font-bold py-2 px-4 rounded'>");
   strcat((char *)http, "</div>");
 
   strcat((char *)http, "</form>");
@@ -451,8 +699,46 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 }
 
 /**
+ * @brief  Init Timer 2 for Sensor check
+ * line.
+ * @retval None
+ */
+void MX_TIM2_Init(void) {
+  __HAL_RCC_TIM2_CLK_ENABLE();
+
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 7999; // 8 MHz / (7999 + 1) = 1 kHz (1ms Tick)
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 99; // 100 ms Interrupt: 1 kHz * 100 = 100 ms
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  HAL_TIM_Base_Init(&htim2);
+
+  HAL_NVIC_SetPriority(TIM2_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(TIM2_IRQn);
+}
+
+/**
  * @brief  SPI3 line detection callback.
  * @param  None
  * @retval None
  */
 void SPI3_IRQHandler(void) { HAL_SPI_IRQHandler(&hspi); }
+
+/**
+ * @brief  TIM2 Interrupt handler
+ * @param  None
+ * @retval None
+ */
+void TIM2_IRQHandler(void) { HAL_TIM_IRQHandler(&htim2); }
+/**
+ * @brief  TIM2 Interrupt callback function
+ * @param  None
+ * @retval None
+ */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+  if (htim->Instance == TIM2) {
+    // Hier läuft alle 100ms der Sensorcode
+    read_sensors();
+  }
+}

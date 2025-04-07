@@ -83,6 +83,7 @@ set(HALDRIVER_FILES
         Drivers/BSP/B-L475E-IOT01/stm32l475e_iot01_tsensor.c
         Drivers/BSP/B-L475E-IOT01/stm32l475e_iot01_magneto.c
         Drivers/BSP/Components/hts221/hts221.c
+        Drivers/BSP/Components/lsm6dsl/lsm6dsl.c
 
         Common/Src/es_wifi.c
         Common/Src/es_wifi_io.c

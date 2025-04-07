@@ -37,12 +37,15 @@
 /**
  * @brief STM32L475E IOT01 BSP Driver version number
  */
-#define __STM32L475E_IOT01_BSP_VERSION_MAIN (0x01) /*!< [31:24] main version   \
-                                                    */
-#define __STM32L475E_IOT01_BSP_VERSION_SUB1 (0x01) /*!< [23:16] sub1 version   \
-                                                    */
-#define __STM32L475E_IOT01_BSP_VERSION_SUB2 (0x08) /*!< [15:8]  sub2 version   \
-                                                    */
+#define __STM32L475E_IOT01_BSP_VERSION_MAIN                                    \
+  (0x01) /*!< [31:24] main version                                             \
+          */
+#define __STM32L475E_IOT01_BSP_VERSION_SUB1                                    \
+  (0x01) /*!< [23:16] sub1 version                                             \
+          */
+#define __STM32L475E_IOT01_BSP_VERSION_SUB2                                    \
+  (0x08) /*!< [15:8]  sub2 version                                             \
+          */
 #define __STM32L475E_IOT01_BSP_VERSION_RC                                      \
   (0x00) /*!< [7:0]  release candidate */
 #define __STM32L475E_IOT01_BSP_VERSION                                         \
@@ -129,6 +132,8 @@ uint16_t NFC_IO_IsDeviceReady(uint8_t Addr, uint32_t Trials);
 void NFC_IO_ReadState(uint8_t *pPinState);
 void NFC_IO_RfDisable(uint8_t PinState);
 void NFC_IO_Delay(uint32_t Delay);
+void startToF();
+void getDistance(int *distance);
 
 /**
  * @}
@@ -768,6 +773,34 @@ void NFC_IO_RfDisable(uint8_t PinState) {
  * @retval None
  */
 void NFC_IO_Delay(uint32_t Delay) { HAL_Delay(Delay); }
+
+void startToF() {
+
+  uint8_t addressWrite = 0x52;
+  uint8_t turnOn[] = {0x00, 0x01};
+  HAL_I2C_Master_Transmit(&hI2cHandler, addressWrite, turnOn, 2, 1);
+}
+
+void getDistance(int *distance) {
+  uint8_t addressWrite = 0x52;
+  uint8_t addressRead = 0x53;
+  uint8_t resultAddress[] = {0x1e};
+  uint8_t rawData[] = {0, 0};
+
+  HAL_I2C_Master_Transmit(&hI2cHandler, addressWrite, resultAddress, 1, 1);
+
+  HAL_I2C_Master_Receive(&hI2cHandler, addressRead, rawData, 2, 1);
+  printf("%d", rawData[0]);
+  *distance = (rawData[0] << 8) + rawData[1] - 20;
+
+  // Ignoriere ungultige und ungenaue Werte
+  if (*distance < 0) {
+    *distance = 0;
+  }
+  if (*distance > 1500) {
+    *distance = 0;
+  }
+}
 
 /**
  * @}
