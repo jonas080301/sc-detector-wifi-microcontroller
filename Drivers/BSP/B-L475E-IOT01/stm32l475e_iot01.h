@@ -23,8 +23,15 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+#define PROXIMITY_I2C_ADDRESS ((uint16_t)0x0052)
+#define VL53L0X_ID ((uint16_t)0xEEAA)
+#define VL53L0X_XSHUT_Pin GPIO_PIN_6
+#define VL53L0X_XSHUT_GPIO_Port GPIOC
 
 /* Includes ------------------------------------------------------------------*/
+#include "../Components/vl53l0x/vl53l0x_api.h"
+#include "../Components/vl53l0x/vl53l0x_def.h"
+#include "../Components/vl53l0x/vl53l0x_tof.h"
 #include "stm32l4xx_hal.h"
 
 /** @addtogroup BSP
@@ -262,8 +269,11 @@ void BSP_PB_DeInit(Button_TypeDef Button);
 uint32_t BSP_PB_GetState(Button_TypeDef Button);
 void BSP_COM_Init(COM_TypeDef COM, UART_HandleTypeDef *husart);
 void BSP_COM_DeInit(COM_TypeDef COM, UART_HandleTypeDef *huart);
-void startToF();
-void getDistance(int *distance);
+uint16_t VL53L0X_PROXIMITY_GetDistance(void);
+void Error_Handler(void);
+void VL53L0X_PROXIMITY_Init(void);
+extern void SENSOR_IO_Init(void);
+
 /**
  * @}
  */

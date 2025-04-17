@@ -53,26 +53,14 @@ set(HALDRIVER_FILES
         Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_ll_usb.c 
         Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_iwdg.c 
 
-        # Rangesensor
-        # Drivers/Sensors/RangeSensor/vl53l0x/vl53l0x_api_calibration.c
-        # Drivers/Sensors/RangeSensor/vl53l0x/vl53l0x_api_core.c
-        # Drivers/Sensors/RangeSensor/vl53l0x/vl53l0x_api_ranging.c
-        # Drivers/Sensors/RangeSensor/vl53l0x/vl53l0x_api_strings.c
-        # Drivers/Sensors/RangeSensor/vl53l0x/vl53l0x_api.c
-        # Drivers/Sensors/RangeSensor/vl53l0x/vl53l0x_platform_log.c
-        # Drivers/Sensors/RangeSensor/vl53l0x/vl53l0x_tof.c
-        # Drivers/Sensors/RangeSensor/vl53l0x_read.c
-
-        #TempHumidity
-        #Drivers/Sensors/all_i2c_sensors.c
-        #Drivers/Sensors/TempHumiditySensor/hts221.c
-        #Drivers/Sensors/TempHumiditySensor/hts221_read.c
-        #Drivers/Sensors/PressureSensor/lps22hb_read.c
-        #Drivers/Sensors/PressureSensor/lps22hb.c
-        #Drivers/Sensors/MagnetometerSensor/lis3mdl_read.c
-        #Drivers/Sensors/MagnetometerSensor/lis3mdl.c
-        #Drivers/Sensors/AccelerationSensor/lsm6dsl_read.c
-        #Drivers/Sensors/AccelerationSensor/lsm6dsl.c
+        # Rangesensor Lidar VL5310X
+        Drivers/BSP/Components/vl53l0x/vl53l0x_api_calibration.c
+        Drivers/BSP/Components/vl53l0x/vl53l0x_api_core.c
+        Drivers/BSP/Components/vl53l0x/vl53l0x_api_ranging.c
+        Drivers/BSP/Components/vl53l0x/vl53l0x_api_strings.c
+        Drivers/BSP/Components/vl53l0x/vl53l0x_api.c
+        Drivers/BSP/Components/vl53l0x/vl53l0x_platform_log.c
+        Drivers/BSP/Components/vl53l0x/vl53l0x_tof.c
 
         #Wifi
         Drivers/BSP/B-L475E-IOT01/stm32l475e_iot01.c

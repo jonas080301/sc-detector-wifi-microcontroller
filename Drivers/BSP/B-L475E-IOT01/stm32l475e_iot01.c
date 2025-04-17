@@ -88,6 +88,9 @@ const uint16_t COM_RX_AF[COMn] = {DISCOVERY_COM1_RX_AF};
 I2C_HandleTypeDef hI2cHandler;
 UART_HandleTypeDef hDiscoUart;
 
+volatile VL53L0X_Dev_t Dev = {.I2cHandle = &hI2cHandler,
+                              .I2cDevAddr = PROXIMITY_I2C_ADDRESS};
+
 /**
  * @}
  */
@@ -132,8 +135,9 @@ uint16_t NFC_IO_IsDeviceReady(uint8_t Addr, uint32_t Trials);
 void NFC_IO_ReadState(uint8_t *pPinState);
 void NFC_IO_RfDisable(uint8_t PinState);
 void NFC_IO_Delay(uint32_t Delay);
-void startToF();
-void getDistance(int *distance);
+static void VL53L0X_PROXIMITY_MspInit(void);
+uint16_t VL53L0X_PROXIMITY_GetDistance(void);
+void VL53L0X_PROXIMITY_Init(void);
 
 /**
  * @}
@@ -774,32 +778,74 @@ void NFC_IO_RfDisable(uint8_t PinState) {
  */
 void NFC_IO_Delay(uint32_t Delay) { HAL_Delay(Delay); }
 
-void startToF() {
+/**
+ * @brief  VL53L0X proximity sensor Initialization.
+ */
+void VL53L0X_PROXIMITY_Init(void) {
+  uint16_t vl53l0x_id = 0;
+  VL53L0X_DeviceInfo_t VL53L0X_DeviceInfo;
 
-  uint8_t addressWrite = 0x52;
-  uint8_t turnOn[] = {0x00, 0x01};
-  HAL_I2C_Master_Transmit(&hI2cHandler, addressWrite, turnOn, 2, 1);
+  /* Initialize IO interface */
+  SENSOR_IO_Init();
+  VL53L0X_PROXIMITY_MspInit();
+
+  memset(&VL53L0X_DeviceInfo, 0, sizeof(VL53L0X_DeviceInfo_t));
+
+  if (VL53L0X_ERROR_NONE == VL53L0X_GetDeviceInfo(&Dev, &VL53L0X_DeviceInfo)) {
+    if (VL53L0X_ERROR_NONE ==
+        VL53L0X_RdWord(&Dev, VL53L0X_REG_IDENTIFICATION_MODEL_ID,
+                       (uint16_t *)&vl53l0x_id)) {
+      if (vl53l0x_id == VL53L0X_ID) {
+        if (VL53L0X_ERROR_NONE == VL53L0X_DataInit(&Dev)) {
+          Dev.Present = 1;
+          SetupSingleShot(Dev);
+        } else {
+          printf("VL53L0X Time of Flight Failed to send its ID!\n");
+        }
+      }
+    } else {
+      printf("VL53L0X Time of Flight Failed to Initialize!\n");
+    }
+  } else {
+    printf("VL53L0X Time of Flight Failed to get infos!\n");
+  }
 }
 
-void getDistance(int *distance) {
-  uint8_t addressWrite = 0x52;
-  uint8_t addressRead = 0x53;
-  uint8_t resultAddress[] = {0x1e};
-  uint8_t rawData[] = {0, 0};
+/**
+ * @brief  Get distance from VL53L0X proximity sensor.
+ * @retval Distance in mm (invalid values return 0)
+ */
+uint16_t VL53L0X_PROXIMITY_GetDistance(void) {
+  VL53L0X_RangingMeasurementData_t RangingMeasurementData;
 
-  HAL_I2C_Master_Transmit(&hI2cHandler, addressWrite, resultAddress, 1, 1);
+  VL53L0X_PerformSingleRangingMeasurement(&Dev, &RangingMeasurementData);
 
-  HAL_I2C_Master_Receive(&hI2cHandler, addressRead, rawData, 2, 1);
-  printf("%d", rawData[0]);
-  *distance = (rawData[0] << 8) + rawData[1] - 20;
+  uint16_t distance = RangingMeasurementData.RangeMilliMeter;
 
-  // Ignoriere ungultige und ungenaue Werte
-  if (*distance < 0) {
-    *distance = 0;
+  // Filter out unrealistic values
+  if (distance < 5 || distance > 1500) {
+    return 0;
   }
-  if (*distance > 1500) {
-    *distance = 0;
-  }
+
+  return distance;
+}
+
+/**
+ * @brief  VL53L0X proximity sensor Msp Initialization.
+ */
+static void VL53L0X_PROXIMITY_MspInit(void) {
+  GPIO_InitTypeDef GPIO_InitStruct;
+
+  /*Configure GPIO pin : VL53L0X_XSHUT_Pin */
+  GPIO_InitStruct.Pin = VL53L0X_XSHUT_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(VL53L0X_XSHUT_GPIO_Port, &GPIO_InitStruct);
+
+  HAL_GPIO_WritePin(VL53L0X_XSHUT_GPIO_Port, VL53L0X_XSHUT_Pin, GPIO_PIN_SET);
+
+  HAL_Delay(1000);
 }
 
 /**
